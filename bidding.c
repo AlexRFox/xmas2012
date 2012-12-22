@@ -9,6 +9,21 @@
 #include <pulse/pulseaudio.h>
 #include <pulse/glib-mainloop.h>
 
+void trace_setup (double secs);
+
+int sample_rate = 8000;
+void process_data (int16_t const *samps, int nsamps);
+
+double
+get_secs (void)
+{
+	struct timeval tv;
+	gettimeofday (&tv, NULL);
+	return (tv.tv_sec + tv.tv_usec / 1e6);
+}
+
+
+
 void
 usage (void)
 {
@@ -30,7 +45,6 @@ void
 rec_data_cb (pa_stream *s, size_t arg1, void *userdata)
 {
 	const void *data;
-	const unsigned char *up;
 	size_t len;
 	
 	if (pa_stream_peek (s, &data, &len) < 0) {
@@ -38,21 +52,7 @@ rec_data_cb (pa_stream *s, size_t arg1, void *userdata)
 		exit (1);
 	}
 
-	if ((up = data) == NULL)
-		return;
-
-	static FILE *outf;
-	int idx;
-	if (outf == NULL)
-		outf = fopen ("sig.dat", "w");
-	idx = 0;
-	while (idx + 1 < len) {
-		int16_t val;
-		val = up[idx++];
-		val |= (up[idx++] << 8);
-		fprintf (outf, "%d\n", val);
-	}
-	fflush (outf);
+	process_data ((int16_t const *)data, len / 2);
 
 	pa_stream_drop (s);
 }
@@ -76,7 +76,7 @@ setup_record_stream (void)
 	pa_buffer_attr bufattr;
 
 	memset (&ss, 0, sizeof ss);
-	ss.rate = 8000;
+	ss.rate = sample_rate;
 	ss.channels = 1;
 	ss.format = PA_SAMPLE_S16LE;
 	if ((rec_stream = pa_stream_new (ctx, "record", &ss, NULL)) == NULL) {
@@ -133,10 +133,14 @@ static gboolean
 draw_cb (GtkWidget *widget, cairo_t *cr, gpointer data)
 {
 	int width, height;
+	int x;
+
 	gtk_window_get_size (GTK_WINDOW(widget), &width, &height);
 
+	x = (.5 * sin (2 * M_PI * get_secs ()) + .5) * width;
+
 	cairo_move_to (cr, 0, 0);
-	cairo_line_to (cr, width, height);
+	cairo_line_to (cr, x, height);
 	cairo_stroke (cr);
 
 	return (TRUE);
@@ -152,6 +156,13 @@ key_press_event (GtkWidget *widget, GdkEventKey *ev, gpointer data)
 	case GDK_KEY_Escape:
 		gtk_main_quit ();
 	}
+	return (TRUE);
+}
+
+gboolean
+tick (gpointer data)
+{
+	gtk_widget_queue_draw (window);
 	return (TRUE);
 }
 
@@ -171,6 +182,8 @@ setup_gtk (char *title, int width, int height)
 			  G_CALLBACK (key_press_event), NULL);
 
 	gtk_window_set_default_size (GTK_WINDOW (window), width, height);
+
+	g_timeout_add (30, tick, NULL);
 
 	gtk_widget_show_all (window);
 }
@@ -192,6 +205,7 @@ main (int argc, char **argv)
 	if (optind != argc)
 		usage ();
 
+	trace_setup (2);
 
 	setup_pulse_audio (argv[0]);
 
@@ -200,4 +214,92 @@ main (int argc, char **argv)
 	gtk_main ();
 
 	return (0);
+}
+
+struct trace {
+	struct trace *next;
+	char *name;
+	float *buf;
+};
+
+struct trace *traces, **traces_tailp = &traces;
+int ntraces;
+
+int trace_nsamps;
+int trace_off;
+
+struct trace *make_trace (char *name);
+struct trace *raw_trace;
+
+void
+trace_setup (double secs)
+{
+	trace_nsamps = secs * sample_rate;
+	
+	raw_trace = make_trace ("raw");
+}
+
+struct trace *
+make_trace (char *name)
+{
+	struct trace *tp;
+
+	tp = calloc (1, sizeof *tp);
+	tp->name = strdup (name);
+	tp->buf = calloc (trace_nsamps, sizeof *tp->buf);
+
+	*traces_tailp = tp;
+	traces_tailp = &tp->next;
+	ntraces++;
+
+	return (tp);
+}
+
+void
+trace_put_int16 (struct trace *tp, int16_t const *samps, int nsamps)
+{
+	int off, i;
+
+	off = trace_off;
+	for (i = 0; i < nsamps; i++) {
+		tp->buf[off] = samps[i];
+		off = (off + 1) % trace_nsamps;
+	}
+}
+
+void
+process_data (int16_t const *samps, int nsamps)
+{
+	trace_put_int16 (raw_trace, samps, nsamps);
+
+	trace_off = (trace_off + nsamps) % trace_nsamps;
+}
+
+void
+draw_trace (struct trace *tp,
+	    cairo_t *cr, int xoff, int yoff, int width, int height)
+{
+	int x;
+
+	x = (.5 * sin (get_secs ()) + .5) * width;
+
+	cairo_move_to (cr, xoff, yoff);
+	cairo_line_to (cr, xoff + x, yoff + height);
+	cairo_stroke (cr);
+}
+
+void
+draw_traces (cairo_t *cr, int width, int height)
+{
+	int yoff;
+	int trace_height;
+	struct trace *tp;
+
+	yoff = 0;
+	trace_height = height / ntraces;
+
+	for (tp = traces; tp; tp = tp->next) {
+		draw_trace (tp, cr, 0, yoff, width, trace_height);
+		yoff += trace_height;
+	}
 }
