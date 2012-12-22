@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
 
 #include <gtk/gtk.h>
 
@@ -15,21 +16,102 @@ usage (void)
 	exit (1);
 }
 
-pa_glib_mainloop *pa_loop;
-pa_context *pa_ctx;
-int pa_ready;
+pa_glib_mainloop *mainloop;
+pa_context *ctx;
+pa_stream *rec_stream;
 
 void
-pa_state_cb (pa_context *ctx, void *userdata)
+rec_state_cb (pa_stream *s, void *userdata)
+{
+	printf ("rec_state_cb\n");
+}
+
+void
+rec_data_cb (pa_stream *s, size_t arg1, void *userdata)
+{
+	const void *data;
+	const unsigned char *up;
+	size_t len;
+	
+	if (pa_stream_peek (s, &data, &len) < 0) {
+		printf ("pulseaudio input error\n");
+		exit (1);
+	}
+
+	if ((up = data) == NULL)
+		return;
+
+	static FILE *outf;
+	int idx;
+	if (outf == NULL)
+		outf = fopen ("sig.dat", "w");
+	idx = 0;
+	while (idx + 1 < len) {
+		int16_t val;
+		val = up[idx++];
+		val |= (up[idx++] << 8);
+		fprintf (outf, "%d\n", val);
+	}
+	fflush (outf);
+
+	pa_stream_drop (s);
+}
+
+void
+rec_underflow_cb (pa_stream *s, void *userdata)
+{
+	printf ("rec_underflow_cb\n");
+}
+
+void
+rec_overflow_cb (pa_stream *s, void *userdata)
+{
+	printf ("rec_overflow_cb\n");
+}
+
+void
+setup_record_stream (void)
+{
+	pa_sample_spec ss;
+	pa_buffer_attr bufattr;
+
+	memset (&ss, 0, sizeof ss);
+	ss.rate = 8000;
+	ss.channels = 1;
+	ss.format = PA_SAMPLE_S16LE;
+	if ((rec_stream = pa_stream_new (ctx, "record", &ss, NULL)) == NULL) {
+		printf ("can't create record stream\n");
+		exit (1);
+	}
+
+	pa_stream_set_state_callback (rec_stream, rec_state_cb, NULL);
+	pa_stream_set_read_callback (rec_stream, rec_data_cb, NULL);
+	pa_stream_set_underflow_callback (rec_stream, rec_underflow_cb, NULL);
+	pa_stream_set_overflow_callback (rec_stream, rec_overflow_cb, NULL);
+
+	memset (&bufattr, 0, sizeof bufattr);
+	
+	bufattr.maxlength = (uint32_t)-1;
+	bufattr.fragsize = pa_usec_to_bytes(250 * 1000, &ss);
+
+	pa_stream_connect_record (rec_stream, NULL, &bufattr,
+				  PA_STREAM_INTERPOLATE_TIMING
+				  | PA_STREAM_ADJUST_LATENCY
+				  | PA_STREAM_AUTO_TIMING_UPDATE);
+	
+}
+void
+ctx_state_cb (pa_context *ctx, void *userdata)
 {
 	switch (pa_context_get_state (ctx)) {
 	case PA_CONTEXT_READY:
 		printf ("pulseaudio ready\n");
-		pa_ready = 1;
+		setup_record_stream ();
 		break;
 	case PA_CONTEXT_FAILED:
 	case PA_CONTEXT_TERMINATED:
-		pa_ready = -1;
+		printf ("pulseaudio error\n");
+		exit (1);
 		break;
 	default:
 		break;
@@ -39,11 +121,10 @@ pa_state_cb (pa_context *ctx, void *userdata)
 void
 setup_pulse_audio (char *name)
 {
-	pa_loop = pa_glib_mainloop_new (g_main_context_default ());
-	pa_ctx = pa_context_new (pa_glib_mainloop_get_api (pa_loop),
-				 name);
-	pa_context_connect (pa_ctx, NULL, 0, NULL);
-	pa_context_set_state_callback (pa_ctx, pa_state_cb, NULL);
+	mainloop = pa_glib_mainloop_new (g_main_context_default ());
+	ctx = pa_context_new (pa_glib_mainloop_get_api (mainloop), name);
+	pa_context_connect (ctx, NULL, 0, NULL);
+	pa_context_set_state_callback (ctx, ctx_state_cb, NULL);
 }
 
 GtkWidget *window;
