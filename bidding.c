@@ -298,11 +298,11 @@ process_data (int16_t const *samps, int nsamps)
 	for (i = 0; i < nsamps; i++) {
 		val = samps[i] / 32768.0;
 
-		time_constant = 1;
+		time_constant = 10;
 		factor = time_constant / sample_rate;
 		avgval = avgval * (1 - factor) + val * factor;
 
-		val -= avgval;
+//		val -= avgval;
 
 		raw_samps[raw_offset] = val;
 		raw_offset = (raw_offset + 1) % raw_nsamps;
@@ -329,10 +329,22 @@ draw_traces (cairo_t *cr, int width, int height)
 
 	center_y = height / 2;
 
+	cairo_set_source_rgb (cr, 1, 0, 0);
+	cairo_move_to (cr, 0, center_y);
+	cairo_line_to (cr, width, center_y);
+	cairo_stroke (cr);
+
+
+
+	cairo_set_source_rgb (cr, 0, 0, 0);
 	cairo_move_to (cr, 0, center_y);
 
 	for (x = 0; x < width; x++) {
-		y = 10 * raw_disp[(x + raw_disp_off) % raw_disp_width];
+		if (0) {
+			y = 10 * raw_disp[(x + raw_disp_off) % raw_disp_width];
+		} else {
+			y = 10 * raw_disp[x];
+		}
 
 		cairo_line_to (cr, x, height - (y + center_y));
 	}
