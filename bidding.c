@@ -9,9 +9,16 @@
 #include <pulse/pulseaudio.h>
 #include <pulse/glib-mainloop.h>
 
-void trace_setup (double secs);
+int freeze;
 
-int sample_rate = 8000;
+gboolean tick (gpointer data);
+
+void trace_setup (double secs);
+void draw_traces (cairo_t *cr, int width, int height);
+
+
+int sample_rate;
+int samps_per_frame;
 void process_data (int16_t const *samps, int nsamps);
 
 double
@@ -55,6 +62,8 @@ rec_data_cb (pa_stream *s, size_t arg1, void *userdata)
 	process_data ((int16_t const *)data, len / 2);
 
 	pa_stream_drop (s);
+
+	tick (NULL);
 }
 
 void
@@ -133,15 +142,12 @@ static gboolean
 draw_cb (GtkWidget *widget, cairo_t *cr, gpointer data)
 {
 	int width, height;
-	int x;
 
 	gtk_window_get_size (GTK_WINDOW(widget), &width, &height);
 
-	x = (.5 * sin (2 * M_PI * get_secs ()) + .5) * width;
+	draw_traces (cr, width, height);
 
-	cairo_move_to (cr, 0, 0);
-	cairo_line_to (cr, x, height);
-	cairo_stroke (cr);
+	gdk_display_sync (gtk_widget_get_display (window));
 
 	return (TRUE);
 }
@@ -155,6 +161,10 @@ key_press_event (GtkWidget *widget, GdkEventKey *ev, gpointer data)
 	case 'w': /* covers CTL-w */
 	case GDK_KEY_Escape:
 		gtk_main_quit ();
+		break;
+	case ' ':
+		freeze ^= 1;
+		break;
 	}
 	return (TRUE);
 }
@@ -183,7 +193,7 @@ setup_gtk (char *title, int width, int height)
 
 	gtk_window_set_default_size (GTK_WINDOW (window), width, height);
 
-	g_timeout_add (30, tick, NULL);
+//	g_timeout_add (10, tick, NULL);
 
 	gtk_widget_show_all (window);
 }
@@ -205,11 +215,14 @@ main (int argc, char **argv)
 	if (optind != argc)
 		usage ();
 
-	trace_setup (2);
+	/* 8000 samps per second; 20 msec frames means 160 samps/frame */
+	sample_rate = 8000;
+
+	trace_setup (4);
 
 	setup_pulse_audio (argv[0]);
 
-	setup_gtk (argv[0], 640, 480);
+	setup_gtk (argv[0], 1000, 300);
 
 	gtk_main ();
 
@@ -219,7 +232,7 @@ main (int argc, char **argv)
 struct trace {
 	struct trace *next;
 	char *name;
-	float *buf;
+	double *buf;
 };
 
 struct trace *traces, **traces_tailp = &traces;
@@ -229,14 +242,102 @@ int trace_nsamps;
 int trace_off;
 
 struct trace *make_trace (char *name);
-struct trace *raw_trace;
+
+double raw_secs;
+double *raw_samps;
+int raw_nsamps;
+int raw_offset;
+
+double *raw_disp;
+int raw_disp_width;
+int raw_disp_off;
+int raw_disp_thresh;
+double raw_disp_acc;
+int raw_disp_count;
+
+void
+set_raw_disp_width (int width)
+{
+	free (raw_disp);
+	raw_disp_width = width;
+	raw_disp = calloc (raw_disp_width, sizeof *raw_disp);
+
+	raw_disp_thresh = raw_nsamps / raw_disp_width;
+	if (raw_disp_thresh < 1)
+		raw_disp_thresh = 1;
+
+	raw_disp_off = 0;
+	raw_disp_acc = 0;
+	raw_disp_count = 0;
+}
 
 void
 trace_setup (double secs)
 {
+	raw_secs = secs;
+
+	raw_nsamps = raw_secs * sample_rate;
+	raw_samps = calloc (raw_nsamps, sizeof *raw_samps);
+
+	set_raw_disp_width (100);
+
 	trace_nsamps = secs * sample_rate;
-	
-	raw_trace = make_trace ("raw");
+}
+
+void
+process_data (int16_t const *samps, int nsamps)
+{
+	int i;
+	double val;
+	static double avgval;
+	double factor, time_constant;
+
+	if (freeze)
+		return;
+
+	for (i = 0; i < nsamps; i++) {
+		val = samps[i] / 32768.0;
+
+		time_constant = 1;
+		factor = time_constant / sample_rate;
+		avgval = avgval * (1 - factor) + val * factor;
+
+		val -= avgval;
+
+		raw_samps[raw_offset] = val;
+		raw_offset = (raw_offset + 1) % raw_nsamps;
+
+		raw_disp_acc += log (val * val);
+		raw_disp_count++;
+		if (raw_disp_count >= raw_disp_thresh) {
+			raw_disp[raw_disp_off] = raw_disp_acc / raw_disp_count;
+			raw_disp_off = (raw_disp_off + 1) % raw_disp_width;
+			raw_disp_acc = 0;
+			raw_disp_count = 0;
+		}
+	}
+}
+
+void
+draw_traces (cairo_t *cr, int width, int height)
+{
+	int center_y;
+	int x, y;
+
+	if (raw_disp_width != width)
+		set_raw_disp_width (width);
+
+	center_y = height / 2;
+
+	cairo_move_to (cr, 0, center_y);
+
+	for (x = 0; x < width; x++) {
+		y = 10 * raw_disp[(x + raw_disp_off) % raw_disp_width];
+
+		cairo_line_to (cr, x, height - (y + center_y));
+	}
+
+	cairo_stroke (cr);
 }
 
 struct trace *
@@ -255,51 +356,3 @@ make_trace (char *name)
 	return (tp);
 }
 
-void
-trace_put_int16 (struct trace *tp, int16_t const *samps, int nsamps)
-{
-	int off, i;
-
-	off = trace_off;
-	for (i = 0; i < nsamps; i++) {
-		tp->buf[off] = samps[i];
-		off = (off + 1) % trace_nsamps;
-	}
-}
-
-void
-process_data (int16_t const *samps, int nsamps)
-{
-	trace_put_int16 (raw_trace, samps, nsamps);
-
-	trace_off = (trace_off + nsamps) % trace_nsamps;
-}
-
-void
-draw_trace (struct trace *tp,
-	    cairo_t *cr, int xoff, int yoff, int width, int height)
-{
-	int x;
-
-	x = (.5 * sin (get_secs ()) + .5) * width;
-
-	cairo_move_to (cr, xoff, yoff);
-	cairo_line_to (cr, xoff + x, yoff + height);
-	cairo_stroke (cr);
-}
-
-void
-draw_traces (cairo_t *cr, int width, int height)
-{
-	int yoff;
-	int trace_height;
-	struct trace *tp;
-
-	yoff = 0;
-	trace_height = height / ntraces;
-
-	for (tp = traces; tp; tp = tp->next) {
-		draw_trace (tp, cr, 0, yoff, width, trace_height);
-		yoff += trace_height;
-	}
-}
