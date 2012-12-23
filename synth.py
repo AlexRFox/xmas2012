@@ -58,6 +58,15 @@ for i in range (min (len (tokens), 2)):
     fn += re.sub (r"[^a-z]", "", tokens[i].lower ()) + "-"
 fn += str (int (time.time ())) + ".mp3"
 
+speechdir = home + "/xmas2012/speech"
+
+if not os.path.isdir (speechdir):
+    try:
+        os.mkdir (speechdir)
+    except:
+        print ("could not create " + speechdir + ", create it manually")
+        exit (1)
+
 absfn = home + "/xmas2012/speech/" + fn
 
 r = speechsynthesizer.file_put_contents(absfn, result)
