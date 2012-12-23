@@ -1,3 +1,6 @@
+#! /usr/bin/env python3
+# powered by iSpeech(R)
+
 from ispeech import *
 
 try:
@@ -21,7 +24,7 @@ speechrecognizer.set_parameter("alias", "command1|YESNO")
 speechrecognizer.set_parameter("YESNO", "yes|no")
 speechrecognizer.set_parameter("command1", "%YESNO%")
 
-speechrecognizer.set_parameter("audio", speechrecognizer.base64_encode(speechrecognizer.file_get_contents("output.wav")))
+speechrecognizer.set_parameter("audio", speechrecognizer.base64_encode(speechrecognizer.file_get_contents("yes.wav")))
 result = speechrecognizer.make_request()
 
 if isinstance(result, dict): #error occured

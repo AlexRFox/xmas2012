@@ -1,4 +1,5 @@
 #! /usr/bin/env python3
+# powered by iSpeech(R)
 
 from ispeech import *
 import sqlite3, time, re, os, getopt, sys
