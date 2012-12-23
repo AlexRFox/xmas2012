@@ -6,7 +6,7 @@ from ispeech import *
 try:
     f = open ("apikey", "r")
 except:
-    print ("scp dellalt:~atw/apikey .")
+    print ("scp pacew.dyndns.org:~atw/apikey .")
     exit (1)
 
 key = f.read ().strip ()
