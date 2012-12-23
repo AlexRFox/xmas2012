@@ -1,7 +1,7 @@
 #! /usr/bin/env python3
 # powered by iSpeech(R)
 
-import sys
+import sys, re
 from ispeech import *
 
 if len (sys.argv) <= 1:
@@ -10,6 +10,11 @@ if len (sys.argv) <= 1:
 
 cmds = None
 if len (sys.argv) >= 3:
+    for c in sys.argv[2:]:
+        if not re.match ("^[a-zA-Z]+$", c):
+            print ("bad command: " + c)
+            print ("all commands must match ^[a-zA-Z]+$")
+            exit (1)
     cmds = "|".join (sys.argv[2:])
 
 try:
