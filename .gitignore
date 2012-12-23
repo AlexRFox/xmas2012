@@ -6,3 +6,7 @@ pulsedevicelist
 ?
 \#*\#
 *.o
+__pycache__
+speech
+speech.sqlite
+apikey
