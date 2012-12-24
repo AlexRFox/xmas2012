@@ -19,6 +19,11 @@ struct utterance {
 	int used;
 	double *samps;
 	double *ratios;
+	double *env;
+
+	int spec_size;
+	double spec_freq_incr;
+	double *spec;
 };
 struct utterance utt;
 
@@ -255,6 +260,7 @@ main (int argc, char **argv)
 	utt.avail = sample_rate * 10;
 	utt.samps = calloc (utt.avail, sizeof *utt.samps);
 	utt.ratios = calloc (utt.avail, sizeof *utt.ratios);
+	utt.env = calloc (utt.avail, sizeof *utt.env);
 
 	system_start_secs = get_secs ();
 
@@ -467,6 +473,13 @@ write_u_dat (void)
 	}
 	fclose (outf);
 
+	outf = fopen ("env.dat", "w");
+	for (idx = 0; idx < utt.used; idx++) {
+		fprintf (outf, "%.6f %g\n", (double)idx / sample_rate,
+			 utt.env[idx]);
+	}
+	fclose (outf);
+
 	if (gp == NULL) {
 		gp = popen ("gnuplot", "w");
 		fprintf (gp, "set style data lines\n");
@@ -474,104 +487,99 @@ write_u_dat (void)
 		fprintf (gp, "set yrange [-1:1]\n");
 	}
 
-	fprintf (gp, "plot \"u.dat\"\n");
+	fprintf (gp, "plot \"u.dat\", \"env.dat\"\n");
 	fflush (gp);
 }
 
 void
-do_fft (double *buf, int len)
+do_fft (void)
 {
 	double *in;
 	fftw_complex *out;
 	fftw_plan plan;
 	int idx;
-	FILE *outf;
-	double freq, val;
-	static FILE *gp;
-	int start_idx, end_idx;
-
-	in = fftw_alloc_real (len);
-	out = fftw_alloc_complex (len);
-	plan = fftw_plan_dft_r2c_1d (len, in, out, FFTW_ESTIMATE);
-	
-	for (idx = 0; idx < len; idx++) {
-		in[idx] = buf[idx];
-	}
-
-	outf = fopen ("spec.dat", "w");
-
-	fftw_execute (plan);
-
-	start_idx = 300.0 / sample_rate * len;
-	end_idx = 3000.0 / sample_rate * len;
-
-	for (idx = start_idx; idx < end_idx; idx++) {
-		freq = (double)idx / len * sample_rate;
-		val = hypot (out[idx][0], out[idx][1]);
-		fprintf (outf, "%g %g\n", freq, val);
-	}
-	fclose (outf);
-
-	fftw_destroy_plan (plan);
-	fftw_free (in);
-	fftw_free (out);
-
-	if (gp == NULL) {
-		gp = popen ("gnuplot", "w");
-		fprintf (gp, "set style data lines\n");
-	}
-	fprintf (gp, "plot \"spec.dat\"\n");
-	fflush (gp);
-
-	write_u_dat ();
-
-}
-
-void
-process_utterance (void)
-{
-	double *in;
-	fftw_complex *out;
-	fftw_plan plan;
-	int idx;
-	FILE *outf;
-	double freq, val;
-	static FILE *gp;
-	int start_idx, end_idx;
+	double freq;
 
 	in = fftw_alloc_real (utt.used);
 	out = fftw_alloc_complex (utt.used);
 	plan = fftw_plan_dft_r2c_1d (utt.used, in, out, FFTW_ESTIMATE);
 	
-	for (idx = 0; idx < utt.used; idx++) {
+	for (idx = 0; idx < utt.used; idx++)
 		in[idx] = utt.samps[idx];
-	}
-
-	outf = fopen ("spec.dat", "w");
 
 	fftw_execute (plan);
 
-	start_idx = 300.0 / sample_rate * utt.used;
-	end_idx = 3000.0 / sample_rate * utt.used;
+	utt.spec_size = utt.used / 2;
+	free (utt.spec);
+	utt.spec = calloc (utt.spec_size, sizeof *utt.spec);
+	utt.spec_freq_incr = (double)sample_rate / utt.used;
 
-	for (idx = start_idx; idx < end_idx; idx++) {
-		freq = (double)idx / utt.used * sample_rate;
-		val = hypot (out[idx][0], out[idx][1]);
-		fprintf (outf, "%g %g\n", freq, val);
+	for (idx = 0; idx < utt.spec_size; idx++) {
+		freq = idx * utt.spec_freq_incr;
+		if (300 < freq && freq < 3000) {
+			utt.spec[idx] = hypot (out[idx][0], out[idx][1]);
+		} else {
+			utt.spec[idx] = 0;
+		}
 	}
-	fclose (outf);
 
 	fftw_destroy_plan (plan);
 	fftw_free (in);
 	fftw_free (out);
+}
+
+void
+write_fft (void)
+{
+	FILE *outf;
+	double freq;
+	static FILE *gp;
+	int idx;
+
+	outf = fopen ("spec.dat", "w");
+
+	for (idx = 0; idx < utt.spec_size; idx++) {
+		freq = idx * utt.spec_freq_incr;
+		fprintf (outf, "%g %g\n", freq, utt.spec[idx]);
+	}
+
+	fclose (outf);
 
 	if (gp == NULL) {
 		gp = popen ("gnuplot", "w");
 		fprintf (gp, "set style data lines\n");
+		fprintf (gp, "set xrange [0:3000]\n");
+		fprintf (gp, "set yrange [0:200]\n");
 	}
 	fprintf (gp, "plot \"spec.dat\"\n");
 	fflush (gp);
+}
 
+void
+do_envelope (void)
+{
+	double time_constant, factor, env;
+	int idx;
+	double val, val2;
+
+	time_constant = .1;
+	factor = 2 * M_PI * 1.0/time_constant * sample_period;
+	env = 0;
+	for (idx = 0; idx < utt.used; idx++) {
+		val = utt.samps[idx];
+		val2 = val * val;
+		env = env * (1 - factor) + val2 * factor;
+		utt.env[idx] = sqrt (env);
+	}
+}
+
+void
+process_utterance (void)
+{
+	do_fft ();
+	do_envelope ();
+
+	write_fft ();
 	write_u_dat ();
 }
 
@@ -596,7 +604,7 @@ process_data (int16_t const *samps, int nsamps)
 
 		raw_samps[raw_offset] = rawval;
 
-		raw_disp_acc += log (rawval * rawval);
+		raw_disp_acc += fabs (rawval);
 		raw_disp_count++;
 		if (raw_disp_count >= raw_disp_thresh) {
 			raw_disp[raw_disp_off] = raw_disp_acc / raw_disp_count;
@@ -608,6 +616,7 @@ process_data (int16_t const *samps, int nsamps)
 
 		time_constant = 10;
 		factor = time_constant / sample_rate;
+		factor = 2 * M_PI * 1.0/time_constant * sample_period;
 		avgval = avgval * (1 - factor) + rawval * factor;
 
 		zval = rawval - avgval;
@@ -617,7 +626,7 @@ process_data (int16_t const *samps, int nsamps)
 		factor = 2 * M_PI * 1.0/time_constant * sample_period;
 		avg_energy_fast = avg_energy_fast*(1-factor) + zval2*factor;
 
-		time_constant = 10;
+		time_constant = 3;
 		factor = 2 * M_PI * 1.0/time_constant * sample_period;
 		if (avg_energy_slow == -1)
 			avg_energy_slow = zval2;
@@ -725,11 +734,7 @@ draw_traces (cairo_t *cr, int width, int height)
 	cairo_move_to (cr, 0, center_y);
 
 	for (x = 0; x < width; x++) {
-		if (0) {
-			y = 10 * raw_disp[(x + raw_disp_off) % raw_disp_width];
-		} else {
-			y = 10 * raw_disp[x];
-		}
+		y = 1000 * raw_disp[x];
 
 		cairo_line_to (cr, x, height - (y + center_y));
 	}
