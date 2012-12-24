@@ -9,7 +9,20 @@
 #include <pulse/pulseaudio.h>
 #include <pulse/glib-mainloop.h>
 
+int vox_state;
+
+void print_stats (void);
+
 int freeze;
+int armed;
+
+void do_arm (void);
+FILE *f_raw;
+FILE *f_avg;
+FILE *f_energy;
+FILE *f_fast;
+FILE *f_slow;
+double armed_timestamp;
 
 gboolean tick (gpointer data);
 
@@ -18,6 +31,7 @@ void draw_traces (cairo_t *cr, int width, int height);
 
 
 int sample_rate;
+double sample_period;
 int samps_per_frame;
 void process_data (int16_t const *samps, int nsamps);
 
@@ -162,8 +176,14 @@ key_press_event (GtkWidget *widget, GdkEventKey *ev, gpointer data)
 	case GDK_KEY_Escape:
 		gtk_main_quit ();
 		break;
-	case ' ':
+	case 'f':
 		freeze ^= 1;
+		break;
+	case ' ':
+		do_arm ();
+		break;
+	case '/':
+		print_stats ();
 		break;
 	}
 	return (TRUE);
@@ -198,6 +218,8 @@ setup_gtk (char *title, int width, int height)
 	gtk_widget_show_all (window);
 }
 
+double system_start_secs;
+
 int
 main (int argc, char **argv)
 {
@@ -217,6 +239,9 @@ main (int argc, char **argv)
 
 	/* 8000 samps per second; 20 msec frames means 160 samps/frame */
 	sample_rate = 8000;
+	sample_period = 1.0 / sample_rate;
+
+	system_start_secs = get_secs ();
 
 	trace_setup (4);
 
@@ -249,6 +274,7 @@ int raw_nsamps;
 int raw_offset;
 
 double *raw_disp;
+int *raw_disp_states;
 int raw_disp_width;
 int raw_disp_off;
 int raw_disp_thresh;
@@ -259,8 +285,10 @@ void
 set_raw_disp_width (int width)
 {
 	free (raw_disp);
+	free (raw_disp_states);
 	raw_disp_width = width;
 	raw_disp = calloc (raw_disp_width, sizeof *raw_disp);
+	raw_disp_states = calloc (raw_disp_width, sizeof *raw_disp_states);
 
 	raw_disp_thresh = raw_nsamps / raw_disp_width;
 	if (raw_disp_thresh < 1)
@@ -285,37 +313,140 @@ trace_setup (double secs)
 }
 
 void
+unarm (void) 
+{
+	if (! armed)
+		return;
+
+	fclose (f_raw);
+	fclose (f_avg);
+	fclose (f_energy);
+	fclose (f_fast);
+	fclose (f_slow);
+	armed = 0;
+}
+
+void
+do_arm (void)
+{
+	unarm ();
+
+	armed_timestamp = 0;
+	f_raw = fopen ("raw.dat", "w");
+	f_avg = fopen ("avg.dat", "w");
+	f_energy = fopen ("energy.dat", "w");
+	f_fast = fopen ("fast.dat", "w");
+	f_slow = fopen ("slow.dat", "w");
+
+	armed = 1;
+}
+
+double avgval, avg_energy_fast, avg_energy_slow;
+double ratio;
+
+double vox_too_quiet_timestamp;
+double vox_too_loud_timestamp;
+double vox_start, vox_end;
+
+void
 process_data (int16_t const *samps, int nsamps)
 {
 	int i;
-	double val;
-	static double avgval;
+	double rawval;
 	double factor, time_constant;
+	double zval, zval2;
+	double now;
 
 	if (freeze)
 		return;
 
 	for (i = 0; i < nsamps; i++) {
-		val = samps[i] / 32768.0;
+		rawval = samps[i] / 32768.0;
 
-		time_constant = 10;
-		factor = time_constant / sample_rate;
-		avgval = avgval * (1 - factor) + val * factor;
+		raw_samps[raw_offset] = rawval;
 
-//		val -= avgval;
-
-		raw_samps[raw_offset] = val;
 		raw_offset = (raw_offset + 1) % raw_nsamps;
-
-		raw_disp_acc += log (val * val);
+		raw_disp_acc += log (rawval * rawval);
 		raw_disp_count++;
 		if (raw_disp_count >= raw_disp_thresh) {
 			raw_disp[raw_disp_off] = raw_disp_acc / raw_disp_count;
+			raw_disp_states[raw_disp_off] = vox_state;
 			raw_disp_off = (raw_disp_off + 1) % raw_disp_width;
 			raw_disp_acc = 0;
 			raw_disp_count = 0;
 		}
+
+		time_constant = 10;
+		factor = time_constant / sample_rate;
+		avgval = avgval * (1 - factor) + rawval * factor;
+
+		zval = rawval - avgval;
+		zval2 = zval * zval;
+
+		time_constant = .25;
+		factor = 2 * M_PI * 1.0/time_constant * sample_period;
+		avg_energy_fast = avg_energy_fast*(1-factor) + zval2*factor;
+
+		time_constant = 10;
+		factor = 2 * M_PI * 1.0/time_constant * sample_period;
+		if (avg_energy_slow == -1)
+			avg_energy_slow = zval2;
+		avg_energy_slow = avg_energy_slow*(1-factor) + zval2*factor;
+
+		if (get_secs () - system_start_secs < .5)
+			avg_energy_slow = avg_energy_fast * 10;
+
+		ratio = sqrt (avg_energy_fast) / sqrt (avg_energy_slow);
+		if (isnan (ratio))
+		    ratio = 0;
+
+		now = get_secs ();
+
+		if (vox_state == 0) {
+			if (ratio < 1.2) {
+				vox_too_quiet_timestamp = now;
+			} else if (now - vox_too_quiet_timestamp > .100) {
+				vox_state = 1;
+				vox_start = now;
+				vox_too_loud_timestamp = now;
+			}
+		} else {
+			if (ratio > 1.1) {
+				vox_too_loud_timestamp = now;
+			} else if (now - vox_too_loud_timestamp > .500) {
+				vox_state = 0;
+				vox_end = now;
+				vox_too_quiet_timestamp = now;
+			}
+		}
+
+		if (armed) {
+			fprintf (f_raw, "%.6f %g\n",
+				 armed_timestamp, rawval);
+			fprintf (f_avg, "%.6f %g\n",
+				 armed_timestamp, avgval);
+			fprintf (f_energy, "%.6f, %g\n",
+				 armed_timestamp, ratio);
+			fprintf (f_fast, "%.6f, %g\n",
+				 armed_timestamp, avg_energy_fast);
+			fprintf (f_slow, "%.6f, %g\n",
+				 armed_timestamp, avg_energy_slow);
+			armed_timestamp += 1.0 / sample_rate;
+
+			if (armed_timestamp > 2) 
+				unarm ();
+		}
 	}
+}
+
+void
+set_color (cairo_t *cr, int color)
+{
+	int r, g, b;
+	r = (color >> 16) & 0xff;
+	g = (color >> 8) & 0xff;
+	b = color & 0xff;
+	cairo_set_source_rgb (cr, r / 255.0, g / 255.0, b / 255.0);
 }
 
 void
@@ -329,11 +460,21 @@ draw_traces (cairo_t *cr, int width, int height)
 
 	center_y = height / 2;
 
-	cairo_set_source_rgb (cr, 1, 0, 0);
+	for (x = 0; x < width; x++) {
+		if (raw_disp_states[x])
+			set_color (cr, 0x88ff88);
+		else
+			set_color (cr, 0xffffff);
+			
+		cairo_move_to (cr, x, 0);
+		cairo_line_to (cr, x, height);
+		cairo_stroke (cr);
+	}
+
+	set_color (cr, 0x8888ff);
 	cairo_move_to (cr, 0, center_y);
 	cairo_line_to (cr, width, center_y);
 	cairo_stroke (cr);
-
 
 
 	cairo_set_source_rgb (cr, 0, 0, 0);
@@ -350,6 +491,12 @@ draw_traces (cairo_t *cr, int width, int height)
 	}
 
 	cairo_stroke (cr);
+
+	if (armed) {
+		cairo_set_source_rgb (cr, 0, 1, 0);
+		cairo_arc (cr, 20, 20, 5, 0, 2 * M_PI);
+		cairo_fill (cr);
+	}
 }
 
 struct trace *
@@ -368,3 +515,12 @@ make_trace (char *name)
 	return (tp);
 }
 
+void
+print_stats (void)
+{
+	printf ("avgval %g\n", avgval);
+	printf ("avg_energy_fast %g\n", avg_energy_fast);
+	printf ("avg_energy_slow %g\n", avg_energy_slow);
+	printf ("ratio %g\n", ratio);
+	printf ("\n");
+}
