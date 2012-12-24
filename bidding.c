@@ -14,6 +14,7 @@ int vox_state;
 int utterance_avail;
 int utterance_used;
 double *utterance;
+double *utterance_ratios;
 
 void print_stats (void);
 
@@ -247,6 +248,7 @@ main (int argc, char **argv)
 
 	utterance_avail = sample_rate * 10;
 	utterance = calloc (utterance_avail, sizeof *utterance);
+	utterance_ratios = calloc (utterance_avail, sizeof *utterance_ratios);
 
 	system_start_secs = get_secs ();
 
@@ -380,7 +382,9 @@ utterance_start (void)
 
 	utterance_used = 0;
 	while (offset != stop_offset && utterance_used < utterance_avail) {
-		utterance[utterance_used++] = raw_samps[offset];
+		utterance[utterance_used] = raw_samps[offset];
+		utterance_ratios[utterance_used] = raw_ratios[offset];
+		utterance_used++;
 		offset = (offset + 1) % raw_nsamps;
 	}
 }
@@ -417,8 +421,11 @@ process_data (int16_t const *samps, int nsamps)
 		rawval = samps[i] / 32768.0;
 
 		raw_samps[raw_offset] = rawval;
-		if (vox_state && utterance_used < utterance_avail)
-			utterance[utterance_used++] = rawval;
+		if (vox_state && utterance_used < utterance_avail) {
+			utterance[utterance_used] = rawval;
+			utterance_ratios[utterance_used] = raw_ratios[raw_offset];
+			utterance_used++;
+		}
 
 		raw_disp_acc += log (rawval * rawval);
 		raw_disp_count++;
