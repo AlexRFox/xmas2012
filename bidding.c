@@ -13,6 +13,12 @@
 void setup_signal_processing (void);
 void process_utterance (void);
 
+void write_u_dat (void);
+void display_u_dat (void);
+
+void write_fft (void);
+void display_fft (void);
+
 int vox_state;
 
 struct utterance {
@@ -243,6 +249,29 @@ setup_gtk (char *title, int width, int height)
 
 double system_start_secs;
 
+char *inname;
+
+void
+process_file (char *inname)
+{
+	FILE *inf;
+	int idx;
+	double val;
+
+	inf = fopen ("u.dat", "r");
+	for (idx = 0; idx < utt.avail; idx++) {
+		if (fscanf (inf, "%*f %lf\n", &val) != 1)
+			break;
+		utt.samps[idx] = val;
+	}
+	fclose (inf);
+
+	utt.used = idx;
+
+	process_utterance ();
+	exit (0);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -257,6 +286,9 @@ main (int argc, char **argv)
 		}
 	}
 
+	if (optind < argc)
+		inname = argv[optind++];
+
 	if (optind != argc)
 		usage ();
 
@@ -268,6 +300,11 @@ main (int argc, char **argv)
 	utt.samps = calloc (utt.avail, sizeof *utt.samps);
 	utt.ratios = calloc (utt.avail, sizeof *utt.ratios);
 	utt.env = calloc (utt.avail, sizeof *utt.env);
+
+	if (inname) {
+		process_file (inname);
+		exit (0);
+	}
 
 	system_start_secs = get_secs ();
 
@@ -484,6 +521,12 @@ utterance_finish (void)
 	}
 
 	process_utterance ();
+
+	write_fft ();
+	write_u_dat ();
+
+	display_fft ();
+	display_u_dat ();
 }
 
 
@@ -492,7 +535,6 @@ write_u_dat (void)
 {
 	FILE *outf;
 	int idx;
-	static FILE *gp;
 
 	outf = fopen ("u.dat", "w");
 	for (idx = 0; idx < utt.used; idx++) {
@@ -514,16 +556,23 @@ write_u_dat (void)
 			 utt.ratios[idx]);
 	}
 	fclose (outf);
+}
+
+void
+display_u_dat (void)
+{
+	static FILE *gp;
 
 	if (gp == NULL) {
 		gp = popen ("gnuplot", "w");
 		fprintf (gp, "set style data lines\n");
-		fprintf (gp, "set xrange [0:2]\n");
+		fprintf (gp, "set xrange [0:.7]\n");
 		fprintf (gp, "set yrange [-1:1]\n");
 		fprintf (gp, "set y2tics\n");
 	}
 
-	fprintf (gp, "plot \"u.dat\", \"env.dat\",\"uratio.dat\" axes x1y2, 2 axes x1y2\n");
+	fprintf (gp, "plot \"u.dat\", \"env.dat\","
+		 "  \"uratio.dat\" axes x1y2, 2 axes x1y2\n");
 	fflush (gp);
 }
 
@@ -569,7 +618,6 @@ write_fft (void)
 {
 	FILE *outf;
 	double freq;
-	static FILE *gp;
 	int idx;
 
 	outf = fopen ("spec.dat", "w");
@@ -580,6 +628,12 @@ write_fft (void)
 	}
 
 	fclose (outf);
+}
+
+void
+display_fft (void)
+{
+	static FILE *gp;
 
 	if (gp == NULL) {
 		gp = popen ("gnuplot", "w");
@@ -614,9 +668,6 @@ process_utterance (void)
 {
 	do_fft ();
 	do_envelope ();
-
-	write_fft ();
-	write_u_dat ();
 }
 
 
