@@ -478,21 +478,20 @@ write_data (double *buf, int len)
 void
 process_utterance (double *buf, int len)
 {
-	fftw_complex *in, *out;
+	double *in;
+	fftw_complex *out;
 	fftw_plan plan;
 	int idx;
 	FILE *outf;
 	double freq, val;
 	static FILE *gp;
 
-	in = fftw_alloc_complex (len);
+	in = fftw_alloc_real (len);
 	out = fftw_alloc_complex (len);
-	plan = fftw_plan_dft_1d (len, in, out,
-				 FFTW_FORWARD, FFTW_ESTIMATE);
+	plan = fftw_plan_dft_r2c_1d (len, in, out, FFTW_ESTIMATE);
 	
 	for (idx = 0; idx < len; idx++) {
-		in[idx][0] = buf[idx];
-		in[idx][1] = 0;
+		in[idx] = buf[idx];
 	}
 
 	outf = fopen ("spec.dat", "w");
