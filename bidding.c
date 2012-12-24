@@ -10,14 +10,17 @@
 #include <pulse/pulseaudio.h>
 #include <pulse/glib-mainloop.h>
 
-void process_utterance (double *buf, int len);
+void process_utterance (void);
 
 int vox_state;
 
-int utterance_avail;
-int utterance_used;
-double *utterance;
-double *utterance_ratios;
+struct utterance {
+	int avail;
+	int used;
+	double *samps;
+	double *ratios;
+};
+struct utterance utt;
 
 void print_stats (void);
 
@@ -249,9 +252,9 @@ main (int argc, char **argv)
 	sample_rate = 8000;
 	sample_period = 1.0 / sample_rate;
 
-	utterance_avail = sample_rate * 10;
-	utterance = calloc (utterance_avail, sizeof *utterance);
-	utterance_ratios = calloc (utterance_avail, sizeof *utterance_ratios);
+	utt.avail = sample_rate * 10;
+	utt.samps = calloc (utt.avail, sizeof *utt.samps);
+	utt.ratios = calloc (utt.avail, sizeof *utt.ratios);
 
 	system_start_secs = get_secs ();
 
@@ -383,11 +386,11 @@ utterance_start (void)
 		offset = (offset + 1) % raw_nsamps;
 	}
 
-	utterance_used = 0;
-	while (offset != stop_offset && utterance_used < utterance_avail) {
-		utterance[utterance_used] = raw_samps[offset];
-		utterance_ratios[utterance_used] = raw_ratios[offset];
-		utterance_used++;
+	utt.used = 0;
+	while (offset != stop_offset && utt.used < utt.avail) {
+		utt.samps[utt.used] = raw_samps[offset];
+		utt.ratios[utt.used] = raw_ratios[offset];
+		utt.used++;
 		offset = (offset + 1) % raw_nsamps;
 	}
 }
@@ -403,64 +406,64 @@ utterance_finish (void)
 
 	nsamps = .040 * sample_rate;
 
-	if (utterance_used < 10 * nsamps)
+	if (utt.used < 10 * nsamps)
 		return;
 
 	/* trim quiet part at end */
-	idx = utterance_used;
-	while (idx > 0 && utterance_ratios[idx - 1] < 1.01)
+	idx = utt.used;
+	while (idx > 0 && utt.ratios[idx - 1] < 1.01)
 		idx--;
-	utterance_used = idx;
+	utt.used = idx;
 
 	/* subtract dc offset */
 	acc = 0;
-	for (idx = 0; idx < utterance_used; idx++)
-		acc += utterance[idx];
-	avg = acc / utterance_used;
-	for (idx = 0; idx < utterance_used; idx++)
-		utterance[idx] -= avg;
+	for (idx = 0; idx < utt.used; idx++)
+		acc += utt.samps[idx];
+	avg = acc / utt.used;
+	for (idx = 0; idx < utt.used; idx++)
+		utt.samps[idx] -= avg;
 
 	/* scale to -1..1 */
-	minval = utterance[0];
-	maxval = utterance[0];
+	minval = utt.samps[0];
+	maxval = utt.samps[0];
 	if (minval > 0)
 		minval = 0;
 	if (maxval < 0)
 		maxval = 0;
-	for (idx = 0; idx < utterance_used; idx++) {
-		if (utterance[idx] < minval)
-			minval = utterance[idx];
-		if (utterance[idx] > maxval)
-			maxval = utterance[idx];
+	for (idx = 0; idx < utt.used; idx++) {
+		if (utt.samps[idx] < minval)
+			minval = utt.samps[idx];
+		if (utt.samps[idx] > maxval)
+			maxval = utt.samps[idx];
 	}
 	factor = maxval;
 	if (-minval > factor)
 		factor = -minval;
-	for (idx = 0; idx < utterance_used; idx++)
-		utterance[idx] /= factor;
+	for (idx = 0; idx < utt.used; idx++)
+		utt.samps[idx] /= factor;
 
 	/* ramp the start and finish to 0 over a 40 msec window */
 	for (idx = 0; idx < nsamps; idx++) {
 		factor = (double)idx / nsamps;
-		utterance[idx] *= factor;
-		utterance[utterance_used - idx - 1] *= factor;
+		utt.samps[idx] *= factor;
+		utt.samps[utt.used - idx - 1] *= factor;
 	}
 
-	process_utterance (utterance, utterance_used);
+	process_utterance ();
 }
 
 
 void
-write_data (double *buf, int len)
+write_u_dat (void)
 {
 	FILE *outf;
 	int idx;
 	static FILE *gp;
 
 	outf = fopen ("u.dat", "w");
-	for (idx = 0; idx < len; idx++) {
+	for (idx = 0; idx < utt.used; idx++) {
 		fprintf (outf, "%.6f %g\n", (double)idx / sample_rate,
-			 buf[idx]);
+			 utt.samps[idx]);
 	}
 	fclose (outf);
 
@@ -476,7 +479,7 @@ write_data (double *buf, int len)
 }
 
 void
-process_utterance (double *buf, int len)
+do_fft (double *buf, int len)
 {
 	double *in;
 	fftw_complex *out;
@@ -485,6 +488,7 @@ process_utterance (double *buf, int len)
 	FILE *outf;
 	double freq, val;
 	static FILE *gp;
+	int start_idx, end_idx;
 
 	in = fftw_alloc_real (len);
 	out = fftw_alloc_complex (len);
@@ -497,7 +501,11 @@ process_utterance (double *buf, int len)
 	outf = fopen ("spec.dat", "w");
 
 	fftw_execute (plan);
-	for (idx = 0; idx < len / 2; idx++) {
+
+	start_idx = 300.0 / sample_rate * len;
+	end_idx = 3000.0 / sample_rate * len;
+
+	for (idx = start_idx; idx < end_idx; idx++) {
 		freq = (double)idx / len * sample_rate;
 		val = hypot (out[idx][0], out[idx][1]);
 		fprintf (outf, "%g %g\n", freq, val);
@@ -515,7 +523,56 @@ process_utterance (double *buf, int len)
 	fprintf (gp, "plot \"spec.dat\"\n");
 	fflush (gp);
 
-	write_data (buf, len);
+	write_u_dat ();
+
+}
+
+void
+process_utterance (void)
+{
+	double *in;
+	fftw_complex *out;
+	fftw_plan plan;
+	int idx;
+	FILE *outf;
+	double freq, val;
+	static FILE *gp;
+	int start_idx, end_idx;
+
+	in = fftw_alloc_real (utt.used);
+	out = fftw_alloc_complex (utt.used);
+	plan = fftw_plan_dft_r2c_1d (utt.used, in, out, FFTW_ESTIMATE);
+	
+	for (idx = 0; idx < utt.used; idx++) {
+		in[idx] = utt.samps[idx];
+	}
+
+	outf = fopen ("spec.dat", "w");
+
+	fftw_execute (plan);
+
+	start_idx = 300.0 / sample_rate * utt.used;
+	end_idx = 3000.0 / sample_rate * utt.used;
+
+	for (idx = start_idx; idx < end_idx; idx++) {
+		freq = (double)idx / utt.used * sample_rate;
+		val = hypot (out[idx][0], out[idx][1]);
+		fprintf (outf, "%g %g\n", freq, val);
+	}
+	fclose (outf);
+
+	fftw_destroy_plan (plan);
+	fftw_free (in);
+	fftw_free (out);
+
+	if (gp == NULL) {
+		gp = popen ("gnuplot", "w");
+		fprintf (gp, "set style data lines\n");
+	}
+	fprintf (gp, "plot \"spec.dat\"\n");
+	fflush (gp);
+
+	write_u_dat ();
 }
 
 
@@ -575,10 +632,10 @@ process_data (int16_t const *samps, int nsamps)
 
 		raw_ratios[raw_offset] = ratio;
 
-		if (vox_state && utterance_used < utterance_avail) {
-			utterance[utterance_used] = rawval;
-			utterance_ratios[utterance_used] = ratio;
-			utterance_used++;
+		if (vox_state && utt.used < utt.avail) {
+			utt.samps[utt.used] = rawval;
+			utt.ratios[utt.used] = ratio;
+			utt.used++;
 		}
 
 		now = get_secs ();
