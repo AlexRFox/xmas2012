@@ -3,6 +3,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdint.h>
+#include <fftw3.h>
 
 #include <gtk/gtk.h>
 
@@ -448,11 +449,13 @@ utterance_finish (void)
 	process_utterance (utterance, utterance_used);
 }
 
+
 void
-process_utterance (double *buf, int len)
+write_data (double *buf, int len)
 {
 	FILE *outf;
 	int idx;
+	static FILE *gp;
 
 	outf = fopen ("u.dat", "w");
 	for (idx = 0; idx < len; idx++) {
@@ -461,6 +464,59 @@ process_utterance (double *buf, int len)
 	}
 	fclose (outf);
 
+	if (gp == NULL) {
+		gp = popen ("gnuplot", "w");
+		fprintf (gp, "set style data lines\n");
+		fprintf (gp, "set xrange [0:.5]\n");
+		fprintf (gp, "set yrange [-1:1]\n");
+	}
+
+	fprintf (gp, "plot \"u.dat\"\n");
+	fflush (gp);
+}
+
+void
+process_utterance (double *buf, int len)
+{
+	fftw_complex *in, *out;
+	fftw_plan plan;
+	int idx;
+	FILE *outf;
+	double freq, val;
+	static FILE *gp;
+
+	in = fftw_alloc_complex (len);
+	out = fftw_alloc_complex (len);
+	plan = fftw_plan_dft_1d (len, in, out,
+				 FFTW_FORWARD, FFTW_ESTIMATE);
+	
+	for (idx = 0; idx < len; idx++) {
+		in[idx][0] = buf[idx];
+		in[idx][1] = 0;
+	}
+
+	outf = fopen ("spec.dat", "w");
+
+	fftw_execute (plan);
+	for (idx = 0; idx < len / 2; idx++) {
+		freq = (double)idx / len * sample_rate;
+		val = hypot (out[idx][0], out[idx][1]);
+		fprintf (outf, "%g %g\n", freq, val);
+	}
+	fclose (outf);
+
+	fftw_destroy_plan (plan);
+	fftw_free (in);
+	fftw_free (out);
+
+	if (gp == NULL) {
+		gp = popen ("gnuplot", "w");
+		fprintf (gp, "set style data lines\n");
+	}
+	fprintf (gp, "plot \"spec.dat\"\n");
+	fflush (gp);
+
+	write_data (buf, len);
 }
 
 
@@ -529,7 +585,7 @@ process_data (int16_t const *samps, int nsamps)
 		now = get_secs ();
 
 		if (vox_state == 0) {
-			if (ratio < 1.2) {
+			if (ratio < 1.5) {
 				vox_too_quiet_timestamp = now;
 			} else if (now - vox_too_quiet_timestamp
 				   > vox_start_debounce) {
