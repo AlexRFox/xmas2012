@@ -1,6 +1,6 @@
 PKGS = gtk+-3.0 libpulse libpulse-mainloop-glib fftw3
 
-CFLAGS = -O -g -Wall `pkg-config --cflags $(PKGS)`
+CFLAGS = -g -Wall `pkg-config --cflags $(PKGS)`
 LIBS = `pkg-config --libs $(PKGS)` -lm
 
 all: pulsedevicelist pa-beep mkbeep bidding

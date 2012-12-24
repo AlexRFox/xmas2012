@@ -10,6 +10,7 @@
 #include <pulse/pulseaudio.h>
 #include <pulse/glib-mainloop.h>
 
+void setup_signal_processing (void);
 void process_utterance (void);
 
 int vox_state;
@@ -24,6 +25,9 @@ struct utterance {
 	int spec_size;
 	double spec_freq_incr;
 	double *spec;
+
+	int lookback;
+	int trim_end;
 };
 struct utterance utt;
 
@@ -34,10 +38,13 @@ int armed;
 
 void do_arm (void);
 FILE *f_raw;
-FILE *f_avg;
+FILE *f_hpf;
+FILE *f_lpf;
 FILE *f_energy;
 FILE *f_fast;
 FILE *f_slow;
+FILE *f_noise;
+FILE *f_ratio;
 double armed_timestamp;
 
 gboolean tick (gpointer data);
@@ -265,6 +272,7 @@ main (int argc, char **argv)
 	system_start_secs = get_secs ();
 
 	trace_setup (4);
+	setup_signal_processing ();
 
 	setup_pulse_audio (argv[0]);
 
@@ -342,10 +350,13 @@ unarm (void)
 		return;
 
 	fclose (f_raw);
-	fclose (f_avg);
+	fclose (f_hpf);
+	fclose (f_lpf);
 	fclose (f_energy);
 	fclose (f_fast);
 	fclose (f_slow);
+	fclose (f_noise);
+	fclose (f_ratio);
 	armed = 0;
 }
 
@@ -356,16 +367,20 @@ do_arm (void)
 
 	armed_timestamp = 0;
 	f_raw = fopen ("raw.dat", "w");
-	f_avg = fopen ("avg.dat", "w");
+	f_hpf = fopen ("hpf.dat", "w");
+	f_lpf = fopen ("lpf.dat", "w");
 	f_energy = fopen ("energy.dat", "w");
 	f_fast = fopen ("fast.dat", "w");
 	f_slow = fopen ("slow.dat", "w");
+	f_noise = fopen ("noise.dat", "w");
+	f_ratio = fopen ("ratio.dat", "w");
 
 	armed = 1;
 }
 
-double avgval, avg_energy_fast, avg_energy_slow;
+double avgval, avg_energy_fast;
 double ratio;
+double noise;
 
 double vox_too_quiet_timestamp;
 double vox_too_loud_timestamp;
@@ -379,7 +394,9 @@ utterance_start (void)
 	int debounce_samps;
 	int offset;
 	int stop_offset;
+	double noise_amp;
 
+	noise_amp = sqrt (noise);
 	debounce_samps = sample_rate * vox_start_debounce;
 
 	offset = (raw_offset + raw_nsamps - debounce_samps * 2)
@@ -387,10 +404,12 @@ utterance_start (void)
 	stop_offset = (raw_offset + 1) % raw_nsamps;
 
 	while (offset != stop_offset) {
-		if (raw_ratios[offset] > .5)
+		if (fabs (raw_samps[offset]) > 4 * noise_amp)
 			break;
 		offset = (offset + 1) % raw_nsamps;
 	}
+
+	utt.lookback = (raw_offset - offset + raw_nsamps) % raw_nsamps;
 
 	utt.used = 0;
 	while (offset != stop_offset && utt.used < utt.avail) {
@@ -409,17 +428,12 @@ utterance_finish (void)
 	int nsamps;
 	double factor;
 	double minval, maxval;
+	double noise_amp;
 
 	nsamps = .040 * sample_rate;
 
 	if (utt.used < 10 * nsamps)
 		return;
-
-	/* trim quiet part at end */
-	idx = utt.used;
-	while (idx > 0 && utt.ratios[idx - 1] < 1.01)
-		idx--;
-	utt.used = idx;
 
 	/* subtract dc offset */
 	acc = 0;
@@ -428,6 +442,14 @@ utterance_finish (void)
 	avg = acc / utt.used;
 	for (idx = 0; idx < utt.used; idx++)
 		utt.samps[idx] -= avg;
+
+	/* trim quiet part at end */
+	noise_amp = sqrt (noise);
+	idx = utt.used;
+	while (idx > 0 && fabs (utt.samps[idx]) < 8 * noise_amp)
+		idx--;
+	utt.trim_end = utt.used - idx;
+	utt.used = idx;
 
 	/* scale to -1..1 */
 	minval = utt.samps[0];
@@ -447,6 +469,12 @@ utterance_finish (void)
 		factor = -minval;
 	for (idx = 0; idx < utt.used; idx++)
 		utt.samps[idx] /= factor;
+
+	if (utt.used < 4 * nsamps) {
+		printf ("utt lookback %d; trim end %d; all gone\n",
+			utt.lookback, utt.trim_end);
+		return;
+	}
 
 	/* ramp the start and finish to 0 over a 40 msec window */
 	for (idx = 0; idx < nsamps; idx++) {
@@ -480,14 +508,22 @@ write_u_dat (void)
 	}
 	fclose (outf);
 
+	outf = fopen ("uratio.dat", "w");
+	for (idx = 0; idx < utt.used; idx++) {
+		fprintf (outf, "%.6f %g\n", (double)idx / sample_rate,
+			 utt.ratios[idx]);
+	}
+	fclose (outf);
+
 	if (gp == NULL) {
 		gp = popen ("gnuplot", "w");
 		fprintf (gp, "set style data lines\n");
-		fprintf (gp, "set xrange [0:.5]\n");
+		fprintf (gp, "set xrange [0:2]\n");
 		fprintf (gp, "set yrange [-1:1]\n");
+		fprintf (gp, "set y2tics\n");
 	}
 
-	fprintf (gp, "plot \"u.dat\", \"env.dat\"\n");
+	fprintf (gp, "plot \"u.dat\", \"env.dat\",\"uratio.dat\" axes x1y2, 2 axes x1y2\n");
 	fflush (gp);
 }
 
@@ -584,6 +620,13 @@ process_utterance (void)
 }
 
 
+double hpfval, lpfval;
+
+void
+setup_signal_processing (void)
+{
+	noise = 1;
+}
 
 void
 process_data (int16_t const *samps, int nsamps)
@@ -593,6 +636,7 @@ process_data (int16_t const *samps, int nsamps)
 	double factor, time_constant;
 	double zval, zval2;
 	double now;
+	double cutoff_freq;
 
 	if (freeze)
 		return;
@@ -614,30 +658,29 @@ process_data (int16_t const *samps, int nsamps)
 			raw_disp_count = 0;
 		}
 
-		time_constant = 10;
-		factor = time_constant / sample_rate;
-		factor = 2 * M_PI * 1.0/time_constant * sample_period;
-		avgval = avgval * (1 - factor) + rawval * factor;
+		cutoff_freq = 1;
+		factor = 2 * M_PI * cutoff_freq * sample_period;
+		lpfval = lpfval * (1-factor) + rawval * factor;
 
-		zval = rawval - avgval;
+		zval = rawval - lpfval;
 		zval2 = zval * zval;
 
 		time_constant = .25;
 		factor = 2 * M_PI * 1.0/time_constant * sample_period;
 		avg_energy_fast = avg_energy_fast*(1-factor) + zval2*factor;
 
-		time_constant = 3;
-		factor = 2 * M_PI * 1.0/time_constant * sample_period;
-		if (avg_energy_slow == -1)
-			avg_energy_slow = zval2;
-		avg_energy_slow = avg_energy_slow*(1-factor) + zval2*factor;
+		if (avg_energy_fast < noise) {
+			noise = avg_energy_fast;
+		} else {
+			time_constant = 20;
+			factor = 2 * M_PI * 1.0/time_constant * sample_period;
+			noise = noise * (1-factor) + avg_energy_fast * factor;
+		}
 
-		if (get_secs () - system_start_secs < .5)
-			avg_energy_slow = avg_energy_fast * 10;
+		if (noise < 5.0 / 32768)
+			noise = 5.0 / 32768;
 
-		ratio = sqrt (avg_energy_fast) / sqrt (avg_energy_slow);
-		if (isnan (ratio))
-		    ratio = 0;
+		ratio = avg_energy_fast / noise;
 
 		raw_ratios[raw_offset] = ratio;
 
@@ -650,25 +693,30 @@ process_data (int16_t const *samps, int nsamps)
 		now = get_secs ();
 
 		if (vox_state == 0) {
-			if (ratio < 1.5) {
+			if (ratio > 4) {
+				if (now - vox_too_quiet_timestamp
+				    > vox_start_debounce) {
+					vox_state = 1;
+					vox_start = now;
+					vox_too_loud_timestamp = now;
+					
+					utterance_start ();
+				}
+			} else {
 				vox_too_quiet_timestamp = now;
-			} else if (now - vox_too_quiet_timestamp
-				   > vox_start_debounce) {
-				vox_state = 1;
-				vox_start = now;
-				vox_too_loud_timestamp = now;
-
-				utterance_start ();
 			}
-		} else {
-			if (ratio > 1.1) {
-				vox_too_loud_timestamp = now;
-			} else if (now - vox_too_loud_timestamp > .500) {
-				vox_state = 0;
-				vox_end = now;
-				vox_too_quiet_timestamp = now;
 
-				utterance_finish ();
+		} else {
+			if (ratio < 3) {
+				if (now - vox_too_loud_timestamp > .500) {
+					vox_state = 0;
+					vox_end = now;
+					vox_too_quiet_timestamp = now;
+					
+					utterance_finish ();
+				}
+			} else {
+				vox_too_loud_timestamp = now;
 			}
 		}
 
@@ -676,14 +724,18 @@ process_data (int16_t const *samps, int nsamps)
 		if (armed) {
 			fprintf (f_raw, "%.6f %g\n",
 				 armed_timestamp, rawval);
-			fprintf (f_avg, "%.6f %g\n",
-				 armed_timestamp, avgval);
+			fprintf (f_hpf, "%.6f %g\n",
+				 armed_timestamp, hpfval);
+			fprintf (f_lpf, "%.6f %g\n",
+				 armed_timestamp, lpfval);
 			fprintf (f_energy, "%.6f, %g\n",
 				 armed_timestamp, ratio);
 			fprintf (f_fast, "%.6f, %g\n",
 				 armed_timestamp, avg_energy_fast);
-			fprintf (f_slow, "%.6f, %g\n",
-				 armed_timestamp, avg_energy_slow);
+			fprintf (f_noise, "%.6f, %g\n",
+				 armed_timestamp, noise);
+			fprintf (f_ratio, "%.6f, %g\n",
+				 armed_timestamp, ratio);
 			armed_timestamp += 1.0 / sample_rate;
 
 			if (armed_timestamp > 2) 
@@ -769,7 +821,6 @@ print_stats (void)
 {
 	printf ("avgval %g\n", avgval);
 	printf ("avg_energy_fast %g\n", avg_energy_fast);
-	printf ("avg_energy_slow %g\n", avg_energy_slow);
 	printf ("ratio %g\n", ratio);
 	printf ("\n");
 }
