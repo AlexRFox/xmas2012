@@ -9,6 +9,8 @@
 #include <pulse/pulseaudio.h>
 #include <pulse/glib-mainloop.h>
 
+void process_utterance (double *buf, int len);
+
 int vox_state;
 
 int utterance_avail;
@@ -375,7 +377,7 @@ utterance_start (void)
 	stop_offset = (raw_offset + 1) % raw_nsamps;
 
 	while (offset != stop_offset) {
-		if (raw_ratios[offset] > 1.1)
+		if (raw_ratios[offset] > .5)
 			break;
 		offset = (offset + 1) % raw_nsamps;
 	}
@@ -392,16 +394,76 @@ utterance_start (void)
 void
 utterance_finish (void)
 {
+	int idx;
+	double acc, avg;
+	int nsamps;
+	double factor;
+	double minval, maxval;
+
+	nsamps = .040 * sample_rate;
+
+	if (utterance_used < 10 * nsamps)
+		return;
+
+	/* trim quiet part at end */
+	idx = utterance_used;
+	while (idx > 0 && utterance_ratios[idx - 1] < 1.01)
+		idx--;
+	utterance_used = idx;
+
+	/* subtract dc offset */
+	acc = 0;
+	for (idx = 0; idx < utterance_used; idx++)
+		acc += utterance[idx];
+	avg = acc / utterance_used;
+	for (idx = 0; idx < utterance_used; idx++)
+		utterance[idx] -= avg;
+
+	/* scale to -1..1 */
+	minval = utterance[0];
+	maxval = utterance[0];
+	if (minval > 0)
+		minval = 0;
+	if (maxval < 0)
+		maxval = 0;
+	for (idx = 0; idx < utterance_used; idx++) {
+		if (utterance[idx] < minval)
+			minval = utterance[idx];
+		if (utterance[idx] > maxval)
+			maxval = utterance[idx];
+	}
+	factor = maxval;
+	if (-minval > factor)
+		factor = -minval;
+	for (idx = 0; idx < utterance_used; idx++)
+		utterance[idx] /= factor;
+
+	/* ramp the start and finish to 0 over a 40 msec window */
+	for (idx = 0; idx < nsamps; idx++) {
+		factor = (double)idx / nsamps;
+		utterance[idx] *= factor;
+		utterance[utterance_used - idx - 1] *= factor;
+	}
+
+	process_utterance (utterance, utterance_used);
+}
+
+void
+process_utterance (double *buf, int len)
+{
 	FILE *outf;
 	int idx;
+
 	outf = fopen ("u.dat", "w");
-	for (idx = 0; idx < utterance_used; idx++) {
+	for (idx = 0; idx < len; idx++) {
 		fprintf (outf, "%.6f %g\n", (double)idx / sample_rate,
-			 utterance[idx]);
+			 buf[idx]);
 	}
 	fclose (outf);
-	printf ("written\n");
+
 }
+
+
 
 void
 process_data (int16_t const *samps, int nsamps)
@@ -421,11 +483,6 @@ process_data (int16_t const *samps, int nsamps)
 		rawval = samps[i] / 32768.0;
 
 		raw_samps[raw_offset] = rawval;
-		if (vox_state && utterance_used < utterance_avail) {
-			utterance[utterance_used] = rawval;
-			utterance_ratios[utterance_used] = raw_ratios[raw_offset];
-			utterance_used++;
-		}
 
 		raw_disp_acc += log (rawval * rawval);
 		raw_disp_count++;
@@ -462,6 +519,12 @@ process_data (int16_t const *samps, int nsamps)
 		    ratio = 0;
 
 		raw_ratios[raw_offset] = ratio;
+
+		if (vox_state && utterance_used < utterance_avail) {
+			utterance[utterance_used] = rawval;
+			utterance_ratios[utterance_used] = ratio;
+			utterance_used++;
+		}
 
 		now = get_secs ();
 
