@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <fftw3.h>
+#include <sndfile.h>
 
 #include <gtk/gtk.h>
 
@@ -19,6 +20,8 @@ void display_u_dat (void);
 void write_fft (void);
 void display_fft (void);
 
+
+
 int vox_state;
 
 struct utterance {
@@ -27,6 +30,9 @@ struct utterance {
 	double *samps;
 	double *ratios;
 	double *env;
+	double *denv;
+	double *stats;
+	double *slope;
 
 	int spec_size;
 	double spec_freq_incr;
@@ -300,6 +306,9 @@ main (int argc, char **argv)
 	utt.samps = calloc (utt.avail, sizeof *utt.samps);
 	utt.ratios = calloc (utt.avail, sizeof *utt.ratios);
 	utt.env = calloc (utt.avail, sizeof *utt.env);
+	utt.denv = calloc (utt.avail, sizeof *utt.denv);
+	utt.stats = calloc (utt.avail, sizeof *utt.stats);
+	utt.slope = calloc (utt.avail, sizeof *utt.slope);
 
 	if (inname) {
 		process_file (inname);
@@ -522,10 +531,7 @@ utterance_finish (void)
 
 	process_utterance ();
 
-	write_fft ();
-	write_u_dat ();
-
-	display_fft ();
+//	display_fft ();
 	display_u_dat ();
 }
 
@@ -550,6 +556,20 @@ write_u_dat (void)
 	}
 	fclose (outf);
 
+	outf = fopen ("denv.dat", "w");
+	for (idx = 0; idx < utt.used; idx++) {
+		fprintf (outf, "%.6f %g\n", (double)idx / sample_rate,
+			 utt.denv[idx]);
+	}
+	fclose (outf);
+
+	outf = fopen ("slope.dat", "w");
+	for (idx = 0; idx < utt.used; idx++) {
+		fprintf (outf, "%.6f %g\n", (double)idx / sample_rate,
+			 utt.slope[idx]);
+	}
+	fclose (outf);
+
 	outf = fopen ("uratio.dat", "w");
 	for (idx = 0; idx < utt.used; idx++) {
 		fprintf (outf, "%.6f %g\n", (double)idx / sample_rate,
@@ -566,13 +586,14 @@ display_u_dat (void)
 	if (gp == NULL) {
 		gp = popen ("gnuplot", "w");
 		fprintf (gp, "set style data lines\n");
-		fprintf (gp, "set xrange [0:.7]\n");
+		fprintf (gp, "set xrange [0:.4]\n");
 		fprintf (gp, "set yrange [-1:1]\n");
 		fprintf (gp, "set y2tics\n");
+		fprintf (gp, "set y2range [-5:5]\n");
 	}
 
 	fprintf (gp, "plot \"u.dat\", \"env.dat\","
-		 "  \"uratio.dat\" axes x1y2, 2 axes x1y2\n");
+		 "  \"slope.dat\" axes x1y2\n");
 	fflush (gp);
 }
 
@@ -645,12 +666,52 @@ display_fft (void)
 	fflush (gp);
 }
 
+int
+double_cmp (void const *raw1, void const *raw2)
+{
+	double arg1 = *(double const *)raw1;
+	double arg2 = *(double const *)raw2;
+	if (arg1 < arg2)
+		return (-1);
+	else if (arg1 > arg2)
+		return (1);
+	return (0);
+}
+
+void
+find_next (int *off, int val, double *start, double *end, double *dur)
+{
+	int idx;
+
+	idx = *off;
+	while (idx < utt.used && utt.slope[idx] != val)
+		idx++;
+	*start = idx * sample_period;
+
+	while (idx < utt.used && utt.slope[idx] == val)
+		idx++;
+	*end = idx * sample_period;
+
+	*dur = *end - *start;
+	*off = idx;
+}
+
 void
 do_envelope (void)
 {
 	double time_constant, factor, env;
 	int idx;
 	double val, val2;
+	double last;
+	double inst_vel;
+	double denv;
+	double q1, q3;
+	double zthresh;
+	double p1_start, p1_end, p1_dur;
+	double p2_start, p2_end, p2_dur;
+	double p3_start, p3_end, p3_dur;
+	double p4_start, p4_end, p4_dur;
+	double p13_dist, total;
 
 	time_constant = .1;
 	factor = 2 * M_PI * 1.0/time_constant * sample_period;
@@ -661,13 +722,107 @@ do_envelope (void)
 		env = env * (1 - factor) + val2 * factor;
 		utt.env[idx] = sqrt (env);
 	}
+
+	last = utt.env[0];
+	denv = 0;
+	for (idx = 0; idx < utt.used; idx++) {
+		inst_vel = (utt.env[idx] - last) / sample_period;
+		last = utt.env[idx];
+
+		time_constant = .1;
+		factor = 2 * M_PI * 1.0/time_constant * sample_period;
+		denv = denv * (1 - factor) + inst_vel * factor;
+		utt.denv[idx] = denv;
+	}
+
+	for (idx = 0; idx < utt.used; idx++)
+		utt.stats[idx] = utt.denv[idx];
+	qsort (utt.stats, utt.used, sizeof *utt.stats, double_cmp);
+	
+	q1 = utt.stats[utt.used / 4];
+	q3 = utt.stats[utt.used * 3 / 4];
+
+	
+	zthresh = fabs ((q3 - q1) / 10);
+
+	val = 0;
+	for (idx = 0; idx < utt.used; idx++) {
+		if (val == 0) {
+			if (utt.denv[idx] > q3)
+				val = 1;
+			if (utt.denv[idx] < q1)
+				val = -1;
+		} else if (val == 1) {
+			if (utt.denv[idx] < zthresh)
+				val = 0;
+		} else if (val == -1) {
+			if (utt.denv[idx] > -zthresh)
+				val = 0;
+		}
+		utt.slope[idx] = val;
+	}
+
+	idx = 0;
+	find_next (&idx, 1, &p1_start, &p1_end, &p1_dur);
+	find_next (&idx, -1, &p2_start, &p2_end, &p2_dur);
+	find_next (&idx, 1, &p3_start, &p3_end, &p3_dur);
+	find_next (&idx, -1, &p4_start, &p4_end, &p4_dur);
+
+	p13_dist = p3_start - p1_start;
+	total = p4_end - p1_start;
+
+	if (.025 <= p1_dur && p1_dur <= .100
+	    && .025 <= p3_dur && p3_dur <= .100
+	    && .050 <= p13_dist && p13_dist <= .200
+	    && .150 <= total && total <= .300) {
+		printf ("got bidding\n");
+	}
+}
+
+void
+write_wav (void)
+{
+	SNDFILE *sf;
+	SF_INFO sfinfo;
+	const int sbuf_size = 1000;
+	int16_t sbuf[sbuf_size];
+	int off, thistime, idx;
+
+	memset (&sfinfo, 0, sizeof sfinfo);
+	sfinfo.samplerate = sample_rate;
+	sfinfo.channels = 1;
+	sfinfo.format = SF_FORMAT_WAV | SF_FORMAT_PCM_16;
+
+	if ((sf = sf_open ("utt.wav", SFM_WRITE, &sfinfo)) == NULL) {
+		fprintf (stderr, "can't create utt.wav\n");
+		exit (1);
+	}
+
+	off = 0;
+	while (off < utt.used) {
+		thistime = utt.used - off;
+		if (thistime > sbuf_size)
+			thistime = sbuf_size;
+		for (idx = 0; idx < thistime; idx++)
+			sbuf[idx] = 20000 * utt.samps[off + idx];
+		sf_write_short (sf, sbuf, thistime);
+
+		off += thistime;
+	}
+
+	sf_close (sf);
 }
 
 void
 process_utterance (void)
 {
+	write_wav ();
+
 	do_fft ();
 	do_envelope ();
+
+	write_u_dat ();
+	write_fft ();
 }
 
 
