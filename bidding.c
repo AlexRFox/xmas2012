@@ -712,6 +712,7 @@ do_envelope (void)
 	double p3_start, p3_end, p3_dur;
 	double p4_start, p4_end, p4_dur;
 	double p13_dist, total;
+	int p1_ok, p3_ok, p13_ok, total_ok, got_bidding;
 
 	time_constant = .1;
 	factor = 2 * M_PI * 1.0/time_constant * sample_period;
@@ -771,12 +772,30 @@ do_envelope (void)
 	p13_dist = p3_start - p1_start;
 	total = p4_end - p1_start;
 
-	if (.025 <= p1_dur && p1_dur <= .100
-	    && .025 <= p3_dur && p3_dur <= .100
-	    && .050 <= p13_dist && p13_dist <= .200
-	    && .150 <= total && total <= .300) {
-		printf ("got bidding\n");
-	}
+	p1_ok = 0;
+	p3_ok = 0;
+	p13_ok = 0;
+	total_ok = 0;
+
+	if (.025 <= p1_dur && p1_dur <= .100)
+		p1_ok = 1;
+	if (.010 <= p3_dur && p3_dur <= .100)
+		p3_ok = 1;
+	if (.050 <= p13_dist && p13_dist <= .300)
+		p13_ok = 1;
+	if (.150 <= total && total <= .300)
+		total_ok = 1;
+
+	got_bidding = 0;
+	if (p1_ok && p3_ok && p13_ok && total_ok)
+		got_bidding = 1;
+
+	printf ("env: %5.3f%s %5.3f%s %5.3f%s %5.3f%s %s\n",
+		p1_dur, p1_ok ? "+" : " ",
+		p3_dur, p3_ok ? "+" : " ",
+		p13_dist, p13_ok ? "+" : " ",
+		total, total_ok ? "+" : " ",
+		got_bidding ? "got bidding" : "");
 }
 
 void
