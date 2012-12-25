@@ -26,7 +26,7 @@ elif ext not in known_fmts:
 cmds = None
 if len (sys.argv) >= 3:
     for c in sys.argv[2:]:
-        if not re.match ("^[\w\s]+$", c):
+        if not re.match ("^[\w\s',]+$", c):
             print ("bad command: " + c)
             print ("all commands must match ^[\w\s]+$")
             exit (1)

@@ -12,3 +12,4 @@ speech.sqlite
 apikey
 *.pyc
 bidding
+foo.wav
