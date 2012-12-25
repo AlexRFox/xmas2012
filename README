@@ -2,6 +2,10 @@ christmas 2012 hackathon
 
 probably speech recognition (activation word followed by phrase detection)
 
+sound utilities
+paprefs  (pulse audio prefs)
+gnome-control-center -> sound
+
 
 http://freedesktop.org/software/pulseaudio/doxygen/async.html
 
