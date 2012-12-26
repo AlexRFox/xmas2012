@@ -5,6 +5,10 @@ LIBS = `pkg-config --libs $(PKGS)` -lm
 
 all: pulsedevicelist pa-beep mkbeep bidding
 
+pkgs:
+	apt-get install libpulse-dev libfftw3-dev libsndfile1-dev
+
+
 bidding: bidding.o
 	$(CC) $(CFLAGS) -o bidding bidding.o $(LIBS)
 
