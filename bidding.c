@@ -90,6 +90,7 @@ usage (void)
 pa_glib_mainloop *mainloop;
 pa_context *ctx;
 pa_stream *rec_stream;
+pa_stream *play_stream;
 
 void
 rec_state_cb (pa_stream *s, void *userdata)
@@ -183,6 +184,101 @@ setup_pulse_audio (char *name)
 	ctx = pa_context_new (pa_glib_mainloop_get_api (mainloop), name);
 	pa_context_connect (ctx, NULL, 0, NULL);
 	pa_context_set_state_callback (ctx, ctx_state_cb, NULL);
+}
+
+int ready_buf_used;
+int ready_buf_offset;
+int16_t ready_buf[8000 * 10];
+
+void
+read_ready_sound (void)
+{
+	SNDFILE *sf;
+	SF_INFO sfinfo;
+
+	memset (&sfinfo, 0, sizeof sfinfo);
+	if ((sf = sf_open ("ready.wav", SFM_READ, &sfinfo)) == NULL) {
+		fprintf (stderr, "can't open ready.wav");
+		exit (1);
+	}
+
+	if (sfinfo.samplerate != sample_rate) {
+		fprintf (stderr, "ready.wav: bad sample rate (want %d)\n",
+			 sample_rate);
+		exit (1);
+	}
+
+	if ((sfinfo.format & SF_FORMAT_WAV) == 0) {
+		fprintf (stderr, "ready.wav: not wav format\n");
+		exit (1);
+	}
+
+	if ((sfinfo.format & SF_FORMAT_PCM_16) == 0) {
+		fprintf (stderr, "ready.wav: not pcm16 format\n");
+		exit (1);
+	}
+
+	ready_buf_used = sf_read_short (sf,
+					ready_buf,
+					sizeof ready_buf / sizeof ready_buf[0]);
+	if (ready_buf_used <= 0) {
+		fprintf (stderr, "ready.wav: can't read data\n");
+		exit (1);
+	}
+
+	printf ("ready size = %d\n", ready_buf_used);
+}
+
+void
+play_done_cb (pa_stream *s, int success, void *userdata)
+{
+	printf ("play done %d\n", success);
+}
+
+void
+play_cb (pa_stream *s, size_t length, void *userdata)
+{
+	int thistime;
+
+	thistime = length / 2;
+	if (ready_buf_offset + thistime > ready_buf_used)
+		thistime = ready_buf_used - ready_buf_offset;
+	if (thistime == 0) {
+		printf ("play_cb: nothing left\n");
+		return;
+	}
+
+	pa_stream_write (play_stream, &ready_buf[ready_buf_offset], 
+			 thistime * 2, NULL, 0LL, PA_SEEK_RELATIVE);
+	ready_buf_offset += thistime;
+
+	if (ready_buf_offset >= ready_buf_used) {
+		pa_stream_drain (play_stream, play_done_cb, NULL);
+	}
+}
+
+void
+play_ready (void)
+{
+	pa_sample_spec ss;
+
+	memset (&ss, 0, sizeof ss);
+	ss.rate = sample_rate;
+	ss.channels = 1;
+	ss.format = PA_SAMPLE_S16LE;
+	if ((play_stream = pa_stream_new (ctx, "play ready", &ss, NULL))
+	    == NULL) {
+		fprintf (stderr, "can't make play_stream\n");
+		exit (1);
+	}
+
+	ready_buf_offset = 0;
+	pa_stream_set_write_callback (play_stream, play_cb, NULL);
+	if (pa_stream_connect_playback (play_stream,
+					NULL, NULL, 0, NULL, NULL) < 0) {
+		fprintf (stderr, "can't connect play_stream\n");
+		exit (1);
+	}
 }
 
 GtkWidget *window;
@@ -322,6 +418,8 @@ main (int argc, char **argv)
 
 	setup_pulse_audio (argv[0]);
 
+	read_ready_sound ();
+
 	setup_gtk (argv[0], 1000, 300);
 
 	gtk_main ();
@@ -454,6 +552,8 @@ utterance_start (void)
 			break;
 		offset = (offset + 1) % raw_nsamps;
 	}
+
+	offset = (offset + raw_nsamps - (int)(sample_rate * .25)) % raw_nsamps;
 
 	utt.lookback = (raw_offset - offset + raw_nsamps) % raw_nsamps;
 
@@ -796,6 +896,9 @@ do_envelope (void)
 		p13_dist, p13_ok ? "+" : " ",
 		total, total_ok ? "+" : " ",
 		got_bidding ? "got bidding" : "");
+
+	if (got_bidding)
+		play_ready ();
 }
 
 void
