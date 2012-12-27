@@ -13,3 +13,5 @@ apikey
 *.pyc
 bidding
 foo.wav
+*.dat
+utt.wav
