@@ -12,3 +12,5 @@ http://freedesktop.org/software/pulseaudio/doxygen/async.html
 mkbeep
 sox -r 44100 -e signed-integer -b 16 beep.raw x.wav
 play x.wav
+
+use pulseaudio sample cache instead of leaking playback stream
