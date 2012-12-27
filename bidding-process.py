@@ -1,7 +1,7 @@
 #! /usr/bin/env python3
 # powered by iSpeech(R)
 
-import sys, re, os
+import sys, re, os, subprocess
 from ispeech import *
 
 if len (sys.argv) <= 1:
@@ -64,3 +64,23 @@ if isinstance(result, dict): #error occured
     print(result["error"])
 else:
     print (result);
+
+import json
+
+r = json.loads (result.decode ("utf-8"))
+
+try:
+    f = open ("accesstoken", "r")
+except:
+    print ("deal with oauth stuff and create accesstoken")
+    exit (1)
+
+access_token = f.read ().strip ()
+if r["text"] == "read my email":
+    proc = subprocess.Popen (["/home/atw/gmail/oauth2.py", "--test_imap_authentication", "--access_token=" + access_token, "--user=alex.willisson@gmail.com"], stdout=subprocess.PIPE, stderr=None)
+    out, err = proc.communicate ()
+    proc.wait ()
+
+    for i in out.decode ("utf-8").strip ().split ("\n"):
+        p = subprocess.Popen (["play", i])
+        p.wait ()

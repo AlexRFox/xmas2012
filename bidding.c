@@ -328,7 +328,7 @@ key_press_event (GtkWidget *widget, GdkEventKey *ev, gpointer data)
 		got_bidding = 1;
 		break;
 	case '@':
-		got_bidding = 2;
+		got_bidding = 3;
 		break;
 	}
 	return (TRUE);
@@ -994,7 +994,7 @@ process_utterance (void)
 		}
 		
 		write_wav (fname);
-		sprintf (cmd, "./bidding-process %s", fname);
+		sprintf (cmd, "./bidding-process.py %s", fname);
 		rc = system (cmd);
 		printf ("running: %s: got %d\n", cmd, rc);
 		remove (fname);
