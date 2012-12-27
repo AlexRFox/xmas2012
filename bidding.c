@@ -11,12 +11,17 @@
 #include <pulse/pulseaudio.h>
 #include <pulse/glib-mainloop.h>
 
+GtkWidget *window;
+
+int got_bidding;
+
 void setup_signal_processing (void);
 void process_utterance (void);
 
 void write_u_dat (void);
 void display_u_dat (void);
 
+int enable_fft;
 void write_fft (void);
 void display_fft (void);
 
@@ -109,11 +114,12 @@ rec_data_cb (pa_stream *s, size_t arg1, void *userdata)
 		exit (1);
 	}
 
-	process_data ((int16_t const *)data, len / 2);
+	if (got_bidding == 0 || got_bidding == 3)
+		process_data ((int16_t const *)data, len / 2);
 
 	pa_stream_drop (s);
 
-	tick (NULL);
+	gtk_widget_queue_draw (window);
 }
 
 void
@@ -235,6 +241,8 @@ play_done_cb (pa_stream *s, int success, void *userdata)
 	printf ("play done %d\n", success);
 }
 
+pa_operation *playback_drain_op;
+
 void
 play_cb (pa_stream *s, size_t length, void *userdata)
 {
@@ -253,7 +261,9 @@ play_cb (pa_stream *s, size_t length, void *userdata)
 	ready_buf_offset += thistime;
 
 	if (ready_buf_offset >= ready_buf_used) {
-		pa_stream_drain (play_stream, play_done_cb, NULL);
+		playback_drain_op = pa_stream_drain (play_stream,
+						     play_done_cb,
+						     NULL);
 	}
 }
 
@@ -280,8 +290,6 @@ play_ready (void)
 		exit (1);
 	}
 }
-
-GtkWidget *window;
 
 static gboolean
 draw_cb (GtkWidget *widget, cairo_t *cr, gpointer data)
@@ -316,6 +324,12 @@ key_press_event (GtkWidget *widget, GdkEventKey *ev, gpointer data)
 	case '/':
 		print_stats ();
 		break;
+	case '!':
+		got_bidding = 1;
+		break;
+	case '@':
+		got_bidding = 2;
+		break;
 	}
 	return (TRUE);
 }
@@ -323,7 +337,24 @@ key_press_event (GtkWidget *widget, GdkEventKey *ev, gpointer data)
 gboolean
 tick (gpointer data)
 {
-	gtk_widget_queue_draw (window);
+	if (got_bidding == 1) {
+		got_bidding = 2;
+		play_ready ();
+	}
+
+	if (playback_drain_op) {
+		pa_operation_state_t state;
+
+		state = pa_operation_get_state (playback_drain_op);
+		if (state == PA_OPERATION_DONE) {
+			printf ("play done\n");
+			got_bidding = 3;
+
+			pa_operation_unref (playback_drain_op);
+			playback_drain_op = NULL;
+		}
+	}
+
 	return (TRUE);
 }
 
@@ -344,7 +375,7 @@ setup_gtk (char *title, int width, int height)
 
 	gtk_window_set_default_size (GTK_WINDOW (window), width, height);
 
-//	g_timeout_add (10, tick, NULL);
+	g_timeout_add (10, tick, NULL);
 
 	gtk_widget_show_all (window);
 }
@@ -631,7 +662,8 @@ utterance_finish (void)
 
 	process_utterance ();
 
-//	display_fft ();
+	if (enable_fft)
+		display_fft ();
 	display_u_dat ();
 }
 
@@ -812,7 +844,7 @@ do_envelope (void)
 	double p3_start, p3_end, p3_dur;
 	double p4_start, p4_end, p4_dur;
 	double p13_dist, total;
-	int p1_ok, p3_ok, p13_ok, total_ok, got_bidding;
+	int p1_ok, p3_ok, p13_ok, total_ok;
 
 	time_constant = .1;
 	factor = 2 * M_PI * 1.0/time_constant * sample_period;
@@ -877,9 +909,9 @@ do_envelope (void)
 	p13_ok = 0;
 	total_ok = 0;
 
-	if (.025 <= p1_dur && p1_dur <= .100)
+	if (.010 <= p1_dur && p1_dur <= .120)
 		p1_ok = 1;
-	if (.010 <= p3_dur && p3_dur <= .100)
+	if (.010 <= p3_dur && p3_dur <= .120)
 		p3_ok = 1;
 	if (.050 <= p13_dist && p13_dist <= .300)
 		p13_ok = 1;
@@ -896,13 +928,10 @@ do_envelope (void)
 		p13_dist, p13_ok ? "+" : " ",
 		total, total_ok ? "+" : " ",
 		got_bidding ? "got bidding" : "");
-
-	if (got_bidding)
-		play_ready ();
 }
 
 void
-write_wav (void)
+write_wav (char *filename)
 {
 	SNDFILE *sf;
 	SF_INFO sfinfo;
@@ -915,8 +944,8 @@ write_wav (void)
 	sfinfo.channels = 1;
 	sfinfo.format = SF_FORMAT_WAV | SF_FORMAT_PCM_16;
 
-	if ((sf = sf_open ("utt.wav", SFM_WRITE, &sfinfo)) == NULL) {
-		fprintf (stderr, "can't create utt.wav\n");
+	if ((sf = sf_open (filename, SFM_WRITE, &sfinfo)) == NULL) {
+		fprintf (stderr, "can't create %s\n", filename);
 		exit (1);
 	}
 
@@ -938,13 +967,44 @@ write_wav (void)
 void
 process_utterance (void)
 {
-	write_wav ();
+	char fname_base[1000];
+	char fname[1000];
+	char cmd[1000];
+	int fd;
+	int rc;
 
-	do_fft ();
-	do_envelope ();
+	write_wav ("utt.wav");
+
+	if (enable_fft)
+		do_fft ();
+
+	if (got_bidding == 0) {
+		do_envelope ();
+	} else if (got_bidding == 3) {
+		strcpy (fname_base, "/tmp/utt-XXXXXX");
+		if ((fd = mkstemp (fname_base)) < 0) {
+			fprintf (stderr, "can't create %s\n", fname_base);
+			exit (1);
+		}
+		close (fd);
+		sprintf (fname, "%s.wav", fname_base);
+		if (rename (fname_base, fname) < 0) {
+			fprintf (stderr, "can't rename to %s\n", fname);
+			exit (1);
+		}
+		
+		write_wav (fname);
+		sprintf (cmd, "./bidding-process %s", fname);
+		rc = system (cmd);
+		printf ("running: %s: got %d\n", cmd, rc);
+		remove (fname);
+
+		got_bidding = 0;
+	}
 
 	write_u_dat ();
-	write_fft ();
+	if (enable_fft)
+		write_fft ();
 }
 
 
