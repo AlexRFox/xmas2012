@@ -44,7 +44,7 @@ speechsynthesizer = speechsynthesizer()
 speechsynthesizer.set_parameter("server", "http://api.ispeech.org/api/rest")
 speechsynthesizer.set_parameter("apikey", key)
 speechsynthesizer.set_parameter("text", phrase)
-speechsynthesizer.set_parameter("format", "ogg")
+speechsynthesizer.set_parameter("format", "wav")
 speechsynthesizer.set_parameter("voice", "usenglishfemale")
 speechsynthesizer.set_parameter("output", "json")
 result = speechsynthesizer.make_request()
@@ -57,7 +57,7 @@ if isinstance(result, dict): #error occured
 fn = ""
 for i in range (min (len (tokens), 2)):
     fn += re.sub (r"[^a-z]", "", tokens[i].lower ()) + "-"
-fn += str (int (time.time ())) + ".mp3"
+fn += str (int (time.time ())) + ".wav"
 
 speechdir = home + "/xmas2012/speech"
 
