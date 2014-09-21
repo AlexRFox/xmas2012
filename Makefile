@@ -1,4 +1,4 @@
-PKGS = gtk+-3.0 libpulse libpulse-mainloop-glib fftw3
+PKGS = gtk+-3.0 libpulse libpulse-mainloop-glib fftw3 sndfile
 
 CFLAGS = -g -Wall `pkg-config --cflags $(PKGS)`
 LIBS = `pkg-config --libs $(PKGS)` -lm
